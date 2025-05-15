@@ -34,13 +34,14 @@ const svgProcessor: SvgProcessor = new SvgProcessor(config);
 const sources = grunt.file.expand(`${config.inputFolder}/**/*.svg`);
 
 function getOutputPath(filePath: string, inputBaseFolder: string, outputBaseFolder: string) {
-    return `${outputBaseFolder}${filePath.replace(inputBaseFolder, '')}`;
+    return `${outputBaseFolder}${filePath.replaceAll('\\', '/')
+        .replace(inputBaseFolder.replaceAll('\\', '/'), '')}`;
 }
 
 sources.forEach((filePath: any) => {
     const fileName: string = path.basename(filePath);
     const outputPath: string = getOutputPath(filePath, config.inputFolder, config.outputFolder);
-    console.log(outputPath)
+    console.log(`outputPath: `, outputPath)
     const svgFileContent: string = grunt.file.read(filePath);
     let output: string = svgFileContent;
 
