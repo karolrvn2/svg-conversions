@@ -4,7 +4,7 @@
   "description": "Convert svg files",
   "main": "svg.ts",
   "scripts": {
-    "start": "npx ts-node src/main.ts"
+    "start": "npx tsx src/main.ts"
   },
   "author": "",
   "license": "ISC",
@@ -12,10 +12,10 @@
     "@svgdotjs/svg.js": "^3.0.16",
     "@types/grunt": "^0.4.27",
     "grunt": "^1.1.0",
-    "svg-modify": "0.0.12",
-    "typescript": "^3.9.2"
+    "svg-modify": "0.0.12"
   },
   "devDependencies": {
-    "@types/node": "^14.0.1"
+    "@types/node": "^22.0.1",
+    "typescript": "^5.8.0"
   }
 }
