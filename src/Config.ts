@@ -19,7 +19,9 @@ export class Config {
         // public tolerance: number = 0.35,
         /** contract */
         // public tolerance: number = 0.90,
-        public tolerance: number = 0.090,
+        // public tolerance: number = 0.090,
+        // public tolerance: number = 0.2,
+        public tolerance: number = 0.3,
         public outputMode: string = 'rgb'
 
         // TODO separate preset for print and for web

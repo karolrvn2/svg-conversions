@@ -1,6 +1,7 @@
 /svg
 /out
 .idea/
+.junie/
 node_modules/
 svg/
 package-lock.json

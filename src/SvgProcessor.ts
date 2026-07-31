@@ -32,6 +32,8 @@ export class SvgProcessor {
     private colorLightnessBase: Array<number> = [];
 
     public processImage(output: string, fileName: string, outputMode: string): string {
+        output = this.addRootFill(output);
+
         const namedColorsRegExpString = Array.from(this.selectedNamedColors.keys()).map(word => `\\b${word}\\b`).join('|');
         const regExp: RegExp = new RegExp(`${namedColorsRegExpString}|#[0-9A-F]{3,6}|rgb\\(.*?\\)`, 'gi');
         // let match: RegExpExecArray = null;
@@ -66,6 +68,19 @@ export class SvgProcessor {
             output += `\t${this.generateCssVarName(color)}: ${color.toRgb()}\n`
         });
         return output;
+    }
+
+    /**
+     * Adds a fill="rgb(0,0,0)" attribute to the root <svg> element (unless it already declares a fill)
+     * so that shapes relying on the implicit default black fill still have a color literal to colorize.
+     */
+    private addRootFill(output: string): string {
+        return output.replace(/<svg\b([^>]*)>/i, (match, attrs) => {
+            if (/\bfill\s*=/i.test(attrs)) {
+                return match;
+            }
+            return `<svg fill="rgb(0,0,0)"${attrs}>`;
+        });
     }
 
     /**
