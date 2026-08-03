@@ -1,21 +1,18 @@
 {
   "name": "svg-conversion",
   "version": "1.0.0",
-  "description": "Convert svg files",
-  "main": "svg.ts",
+  "description": "Convert SVG colors in Rust/Wasm Web Workers",
+  "type": "module",
+  "exports": "./web/svg-worker-pool.js",
   "scripts": {
-    "start": "npx tsx src/main.ts"
+    "build": "wasm-pack build --target web --release --out-dir pkg",
+    "prepare:icons": "node scripts/prepare-icons.mjs",
+    "build:demo": "npm run build && npm run prepare:icons && trunk build demo/index.html --release --dist dist",
+    "start:demo": "npm run build && npm run prepare:icons && trunk serve demo/index.html --port 8055 --open",
+    "test": "cargo test",
+    "check": "cargo check --all-targets && cargo check --target wasm32-unknown-unknown"
   },
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@svgdotjs/svg.js": "^3.0.16",
-    "@types/grunt": "^0.4.27",
-    "grunt": "^1.1.0",
-    "svg-modify": "0.0.12"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.1",
-    "typescript": "^5.8.0"
-  }
+  "files": ["pkg", "web"]
 }

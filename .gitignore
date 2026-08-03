@@ -3,6 +3,12 @@
 .idea/
 .junie/
 node_modules/
+target/
+pkg/
+dist/
+.cache/
+demo/icons/catalog.json
+demo/icons/source.json
 svg/
 package-lock.json
 .DS_Store
