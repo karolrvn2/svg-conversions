@@ -1,0 +1,17 @@
+{
+  "name": "svg-conversion-wasm",
+  "type": "module",
+  "description": "SVG color conversion for browser Web Workers",
+  "version": "1.0.0",
+  "license": "ISC",
+  "files": [
+    "svg_conversion_wasm_bg.wasm",
+    "svg_conversion_wasm.js",
+    "svg_conversion_wasm.d.ts"
+  ],
+  "main": "svg_conversion_wasm.js",
+  "types": "svg_conversion_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
