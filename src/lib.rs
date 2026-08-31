@@ -262,7 +262,14 @@ fn transform_element_with_palette(
         for child in &mut element.children {
             if let XMLNode::Text(stylesheet) = child {
                 *stylesheet = transform_stylesheet(
-                    stylesheet, current_color, primary, secondary, bounds, contrast, brightness, mode,
+                    stylesheet,
+                    current_color,
+                    primary,
+                    secondary,
+                    bounds,
+                    contrast,
+                    brightness,
+                    mode,
                 );
             }
         }
@@ -380,7 +387,9 @@ fn transform_palette_style(
             };
             format!(
                 "{property}:{}",
-                palette_color(lightness, primary, secondary, bounds, contrast, brightness, mode)
+                palette_color(
+                    lightness, primary, secondary, bounds, contrast, brightness, mode
+                )
             )
         })
         .collect::<Vec<_>>()
@@ -432,6 +441,25 @@ fn transform_element(
     unique_count: usize,
     mode: OutputMode,
 ) {
+    // Mask paints define alpha geometry rather than the visible logo palette. They must remain
+    // untouched; changing their luminance makes otherwise-solid marks unexpectedly transparent.
+    if local_name(&element.name) == "mask" {
+        return;
+    }
+    if local_name(&element.name) == "style" {
+        for child in &mut element.children {
+            if let XMLNode::Text(stylesheet) = child {
+                *stylesheet = transform_single_color_stylesheet(
+                    stylesheet,
+                    primary,
+                    reference,
+                    svg_bounds,
+                    unique_count,
+                    mode,
+                );
+            }
+        }
+    }
     for (name, value) in &mut element.attributes {
         if COLOR_PROPERTIES.contains(&local_name(name)) {
             if let Some(lightness) = color_lightness(value, primary) {
@@ -453,6 +481,38 @@ fn transform_element(
             transform_element(child, primary, reference, svg_bounds, unique_count, mode);
         }
     }
+}
+
+fn transform_single_color_stylesheet(
+    stylesheet: &str,
+    primary: Hsl,
+    reference: Boundaries,
+    svg_bounds: Boundaries,
+    unique_count: usize,
+    mode: OutputMode,
+) -> String {
+    stylesheet
+        .split_inclusive('}')
+        .map(|rule| {
+            let (body, closing_brace) = rule
+                .strip_suffix('}')
+                .map_or((rule, ""), |body| (body, "}"));
+            let Some((selector, declarations)) = body.split_once('{') else {
+                return rule.to_owned();
+            };
+            format!(
+                "{selector}{{{}{closing_brace}",
+                transform_style(
+                    declarations,
+                    primary,
+                    reference,
+                    svg_bounds,
+                    unique_count,
+                    mode,
+                )
+            )
+        })
+        .collect()
 }
 
 fn transform_style(
@@ -531,7 +591,14 @@ fn transform_stylesheet(
             format!(
                 "{selector}{{{}{closing_brace}",
                 transform_palette_style(
-                    declarations, current_color, primary, secondary, bounds, contrast, brightness, mode,
+                    declarations,
+                    current_color,
+                    primary,
+                    secondary,
+                    bounds,
+                    contrast,
+                    brightness,
+                    mode,
                 )
             )
         })
@@ -656,7 +723,11 @@ fn rgb_to_hsv(color: Color) -> Hsv {
     let min = r.min(g).min(b);
     let delta = max - min;
     if delta.abs() < f64::EPSILON {
-        return Hsv { hue: 0.0, saturation: 0.0, value: max };
+        return Hsv {
+            hue: 0.0,
+            saturation: 0.0,
+            value: max,
+        };
     }
     let hue = if (max - r).abs() < f64::EPSILON {
         60.0 * (((g - b) / delta) % 6.0)
@@ -800,6 +871,14 @@ mod tests {
         let result =
             process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
         assert!(result.contains(".a{fill:rgb(255,0,255);}"));
+    }
+
+    #[test]
+    fn single_color_mode_recolors_embedded_stylesheets_without_touching_masks() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><mask id="m" fill="#fff"><circle fill="#fff"/></mask><style>.logo{fill:#68bd45;}</style><path class="logo" mask="url(#m)"/></svg>"##;
+        let result = process_svg_impl(input, "#00acc1", 0.2, "rgb").unwrap();
+        assert!(result.contains(".logo{fill:rgb("));
+        assert_eq!(result.matches("fill=\"#fff\"").count(), 2);
     }
 
     #[test]

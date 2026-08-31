@@ -6,7 +6,11 @@ self.addEventListener("message", async ({ data }) => {
   const { id, operation = "process", payload = {} } = data ?? {};
   try {
     await ready;
-    const convert = (icon) => payload.secondaryColor
+    // Primary-contrast mode maps the source lightness range around the primary
+    // color's lightness (primary ± contrast), so it deliberately does not use
+    // a secondary color even when the caller has one in its theme state.
+    const usePrimaryContrast = payload.colorMode === "primary_contrast";
+    const convert = (icon) => !usePrimaryContrast && payload.secondaryColor
       ? process_svg_with_palette(
         icon.svg ?? icon,
         payload.primaryColor ?? "#00acc1",
@@ -18,7 +22,7 @@ self.addEventListener("message", async ({ data }) => {
       : process_svg(
         icon.svg ?? icon,
         payload.primaryColor ?? "#00acc1",
-        payload.tolerance ?? 0.2,
+        payload.primaryContrast ?? payload.tolerance ?? 0.2,
         payload.outputMode ?? "rgb",
       );
     const result = operation === "colorMap"
