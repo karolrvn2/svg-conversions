@@ -39,6 +39,13 @@ struct Hsl {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct Hsv {
+    hue: f64,
+    saturation: f64,
+    value: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Boundaries {
     low: f64,
     high: f64,
@@ -65,9 +72,38 @@ pub fn process_svg(
         .map_err(|error| JsError::new(&error))
 }
 
+/// Native-friendly entry point used by the filesystem CLI. Keeping the
+/// conversion itself here means the CLI and the WebAssembly worker always use
+/// the same colorization rules.
+pub fn process_svg_document(
+    svg: &str,
+    primary_color: &str,
+    tolerance: f64,
+    output_mode: &str,
+) -> Result<String, String> {
+    process_svg_impl(svg, primary_color, tolerance, output_mode)
+}
+
+/// Native-friendly entry point for generating the CSS variable map.
+pub fn generate_color_map_document(primary_color: &str) -> Result<String, String> {
+    let primary = parse_color(primary_color)?;
+    let hsl = rgb_to_hsl(primary);
+    let mut output = String::from("html\n");
+    for index in 0..=255 {
+        let color = hsl_to_rgb(Hsl {
+            hue: hsl.hue,
+            saturation: hsl.saturation,
+            lightness: index as f64 / 255.0,
+        });
+        output.push_str(&format!("\t--primary-l-{index}: {}\n", format_rgb(color)));
+    }
+    Ok(output)
+}
+
 /// Maps the darkest source tone to `primary_color` and the lightest to
 /// `secondary_color`. Contrast expands/contracts the tone range around its
-/// midpoint; brightness shifts that midpoint. Both controls are normalized:
+/// midpoint; brightness then adjusts the resulting palette color's HSV value
+/// without moving it toward either palette endpoint or desaturating it. Both controls are normalized:
 /// contrast is 0..=2 (1 is neutral), brightness is -1..=1 (0 is neutral).
 #[wasm_bindgen]
 pub fn process_svg_with_palette(
@@ -91,18 +127,7 @@ pub fn process_svg_with_palette(
 
 #[wasm_bindgen]
 pub fn generate_color_map(primary_color: &str) -> Result<String, JsError> {
-    let primary = parse_color(primary_color).map_err(|error| JsError::new(&error))?;
-    let hsl = rgb_to_hsl(primary);
-    let mut output = String::from("html\n");
-    for index in 0..=255 {
-        let color = hsl_to_rgb(Hsl {
-            hue: hsl.hue,
-            saturation: hsl.saturation,
-            lightness: index as f64 / 255.0,
-        });
-        output.push_str(&format!("\t--primary-l-{index}: {}\n", format_rgb(color)));
-    }
-    Ok(output)
+    generate_color_map_document(primary_color).map_err(|error| JsError::new(&error))
 }
 
 fn process_svg_impl(
@@ -228,6 +253,20 @@ fn transform_element_with_palette(
     brightness: f64,
     mode: OutputMode,
 ) {
+    // A mask's fill is geometry, not visible icon paint. Recoloring it changes the mask's
+    // luminance/opacity (notably Next.js' circular mask), which corrupts the rendered logo.
+    if local_name(&element.name) == "mask" {
+        return;
+    }
+    if local_name(&element.name) == "style" {
+        for child in &mut element.children {
+            if let XMLNode::Text(stylesheet) = child {
+                *stylesheet = transform_stylesheet(
+                    stylesheet, current_color, primary, secondary, bounds, contrast, brightness, mode,
+                );
+            }
+        }
+    }
     for (name, value) in &mut element.attributes {
         if COLOR_PROPERTIES.contains(&local_name(name)) {
             if let Some(lightness) = color_lightness(value, current_color) {
@@ -289,20 +328,82 @@ fn palette_color(
     } else {
         (lightness - bounds.low) / bounds.range()
     };
-    let amount = ((normalized - 0.5) * contrast + 0.5 + brightness * 0.5).clamp(0.0, 1.0);
+    // Contrast belongs to the source-tone -> palette-position mapping. Applying brightness here
+    // would instead move a color toward `primary` or `secondary`, changing its hue/chroma and
+    // making a brightness slider look like a saturation control.
+    let amount = ((normalized - 0.5) * contrast + 0.5).clamp(0.0, 1.0);
     if mode == OutputMode::CssVars {
+        // CSS-variable output is an indexed palette with no lightness transform available at
+        // this stage. The browser UI uses RGB output, where brightness is applied below.
         return format!("var(--palette-{:.0})", amount * 255.0);
     }
-    let amount = amount as f32;
-    format_rgb(Color::new(
-        primary.r + (secondary.r - primary.r) * amount,
-        primary.g + (secondary.g - primary.g) * amount,
-        primary.b + (secondary.b - primary.b) * amount,
-        primary.a + (secondary.a - primary.a) * amount,
-    ))
+    // RGB interpolation turns saturated endpoints into gray/muddy midpoint colors (for example
+    // yellow -> blue). Interpolate hue/value in HSV and retain the strongest endpoint chroma so
+    // lighter icon tones do not become desaturated simply because they are lighter.
+    let primary_hsv = rgb_to_hsv(primary.clone());
+    let secondary_hsv = rgb_to_hsv(secondary.clone());
+    let palette_color = hsv_to_rgb(Hsv {
+        hue: interpolate_hue(primary_hsv.hue, secondary_hsv.hue, amount),
+        saturation: primary_hsv.saturation.max(secondary_hsv.saturation),
+        value: primary_hsv.value + (secondary_hsv.value - primary_hsv.value) * amount,
+    });
+    let mut palette_hsv = rgb_to_hsv(palette_color);
+    palette_hsv.value = if brightness >= 0.0 {
+        palette_hsv.value + (1.0 - palette_hsv.value) * brightness
+    } else {
+        palette_hsv.value * (1.0 + brightness)
+    };
+    format_rgb(hsv_to_rgb(palette_hsv))
+}
+
+fn transform_palette_style(
+    style: &str,
+    current_color: Hsl,
+    primary: &Color,
+    secondary: &Color,
+    bounds: Boundaries,
+    contrast: f64,
+    brightness: f64,
+    mode: OutputMode,
+) -> String {
+    style
+        .split(';')
+        .map(|declaration| {
+            let Some((property, paint)) = declaration.split_once(':') else {
+                return declaration.to_owned();
+            };
+            if !COLOR_PROPERTIES.contains(&property.trim()) {
+                return declaration.to_owned();
+            }
+            let Some(lightness) = color_lightness(paint.trim(), current_color) else {
+                return declaration.to_owned();
+            };
+            format!(
+                "{property}:{}",
+                palette_color(lightness, primary, secondary, bounds, contrast, brightness, mode)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn collect_colors(element: &Element, primary: Hsl, output: &mut Vec<f64>) {
+    // Mask paints determine alpha through luminance and must neither be recolored nor influence
+    // the visible icon's tone bounds.
+    if local_name(&element.name) == "mask" {
+        return;
+    }
+    if local_name(&element.name) == "style" {
+        for child in &element.children {
+            if let XMLNode::Text(stylesheet) = child {
+                for (_, paint) in stylesheet_declarations(stylesheet) {
+                    if let Some(lightness) = color_lightness(paint, primary) {
+                        output.push(lightness);
+                    }
+                }
+            }
+        }
+    }
     for (name, value) in &element.attributes {
         if COLOR_PROPERTIES.contains(&local_name(name)) {
             if let Some(color) = color_lightness(value, primary) {
@@ -398,6 +499,43 @@ fn style_declarations(style: &str) -> impl Iterator<Item = (&str, &str)> {
             .contains(&name.trim())
             .then_some((name.trim(), value.trim()))
     })
+}
+
+fn stylesheet_declarations(stylesheet: &str) -> Vec<(&str, &str)> {
+    stylesheet
+        .split('}')
+        .filter_map(|rule| rule.split_once('{').map(|(_, declarations)| declarations))
+        .flat_map(|declarations| style_declarations(declarations))
+        .collect()
+}
+
+fn transform_stylesheet(
+    stylesheet: &str,
+    current_color: Hsl,
+    primary: &Color,
+    secondary: &Color,
+    bounds: Boundaries,
+    contrast: f64,
+    brightness: f64,
+    mode: OutputMode,
+) -> String {
+    stylesheet
+        .split_inclusive('}')
+        .map(|rule| {
+            let (body, closing_brace) = rule
+                .strip_suffix('}')
+                .map_or((rule, ""), |body| (body, "}"));
+            let Some((selector, declarations)) = body.split_once('{') else {
+                return rule.to_owned();
+            };
+            format!(
+                "{selector}{{{}{closing_brace}",
+                transform_palette_style(
+                    declarations, current_color, primary, secondary, bounds, contrast, brightness, mode,
+                )
+            )
+        })
+        .collect()
 }
 
 fn transformed_color(
@@ -510,6 +648,55 @@ fn hsl_to_rgb(hsl: Hsl) -> Color {
     )
 }
 
+fn rgb_to_hsv(color: Color) -> Hsv {
+    let r = f64::from(color.r);
+    let g = f64::from(color.g);
+    let b = f64::from(color.b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    if delta.abs() < f64::EPSILON {
+        return Hsv { hue: 0.0, saturation: 0.0, value: max };
+    }
+    let hue = if (max - r).abs() < f64::EPSILON {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if (max - g).abs() < f64::EPSILON {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    Hsv {
+        hue: hue.rem_euclid(360.0),
+        saturation: delta / max,
+        value: max,
+    }
+}
+
+fn interpolate_hue(from: f64, to: f64, amount: f64) -> f64 {
+    let shortest_delta = (to - from + 180.0).rem_euclid(360.0) - 180.0;
+    (from + shortest_delta * amount).rem_euclid(360.0)
+}
+
+fn hsv_to_rgb(hsv: Hsv) -> Color {
+    let chroma = hsv.value * hsv.saturation;
+    let x = chroma * (1.0 - ((hsv.hue / 60.0) % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hsv.hue {
+        hue if hue < 60.0 => (chroma, x, 0.0),
+        hue if hue < 120.0 => (x, chroma, 0.0),
+        hue if hue < 180.0 => (0.0, chroma, x),
+        hue if hue < 240.0 => (0.0, x, chroma),
+        hue if hue < 300.0 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = hsv.value - chroma;
+    Color::new(
+        (r1 + m).clamp(0.0, 1.0) as f32,
+        (g1 + m).clamp(0.0, 1.0) as f32,
+        (b1 + m).clamp(0.0, 1.0) as f32,
+        1.0,
+    )
+}
+
 fn format_rgb(color: Color) -> String {
     format!(
         "rgb({},{},{})",
@@ -540,29 +727,31 @@ fn serialize(root: &Element) -> Result<String, String> {
     // decode the image at all without an explicit xmlns.
     if let Some(offset) = xml.find("<svg") {
         if !xml.contains("xmlns=") {
-            xml.insert_str(offset + "<svg".len(), " xmlns=\"http://www.w3.org/2000/svg\"");
+            xml.insert_str(
+                offset + "<svg".len(),
+                " xmlns=\"http://www.w3.org/2000/svg\"",
+            );
         }
     }
     Ok(xml)
 }
 
 fn parse_svg_document(svg: &str) -> Result<Element, String> {
-    if svg.contains("xlink:") && !svg.contains("xmlns:xlink") {
-        let root_start = svg
+    // A few older logo exports use `xmlns2:xlink` rather than the XML
+    // namespace declaration `xmlns:xlink`. XML parsers correctly reject that
+    // unbound `xmlns2` prefix, so normalize the producer typo before parsing.
+    let mut normalized = svg.replace("xmlns2:xlink=", "xmlns:xlink=");
+    if normalized.contains("xlink:") && !normalized.contains("xmlns:xlink") {
+        let root_start = normalized
             .find("<svg")
             .ok_or_else(|| "document root must be an <svg> element".to_owned())?;
-        let root_end = svg[root_start..]
+        let root_end = normalized[root_start..]
             .find('>')
             .map(|offset| root_start + offset)
             .ok_or_else(|| "malformed SVG root element".to_owned())?;
-        let mut normalized = String::with_capacity(svg.len() + 44);
-        normalized.push_str(&svg[..root_end]);
-        normalized.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
-        normalized.push_str(&svg[root_end..]);
-        Element::parse(normalized.as_bytes()).map_err(|error| error.to_string())
-    } else {
-        Element::parse(svg.as_bytes()).map_err(|error| error.to_string())
+        normalized.insert_str(root_end, " xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
     }
+    Element::parse(normalized.as_bytes()).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -606,11 +795,48 @@ mod tests {
     }
 
     #[test]
+    fn recolors_colors_declared_in_embedded_stylesheets() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><style>.a{fill:#68bd45;}</style><path class="a"/></svg>"##;
+        let result =
+            process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
+        assert!(result.contains(".a{fill:rgb(255,0,255);}"));
+    }
+
+    #[test]
+    fn preserves_mask_paint_while_recoloring_visible_icon_paint() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><mask id="m" fill="#fff"><circle fill="#fff"/></mask><path fill="#000" mask="url(#m)"/></svg>"##;
+        let result =
+            process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
+        assert_eq!(result.matches("fill=\"#fff\"").count(), 2);
+        assert!(result.contains("fill=\"rgb(255,0,255)\""));
+    }
+
+    #[test]
+    fn brightness_preserves_hsv_saturation_without_shifting_to_a_palette_endpoint() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#808080"/></svg>"##;
+        let result =
+            process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 1.0, "rgb").unwrap();
+
+        // At the palette midpoint red/blue is purple. Raising brightness produces a brighter,
+        // still fully saturated purple—not a washed-out purple or the blue secondary endpoint.
+        assert!(result.contains("fill=\"rgb(255,0,255)\""));
+        assert!(!result.contains("fill=\"rgb(0,0,255)\""));
+    }
+
+    #[test]
     fn repairs_unbound_xlink_prefix_from_published_icons() {
         let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><use xlink:href="#shape"/></svg>"##;
         let result =
             process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
         assert!(result.contains("xmlns:xlink=\"http://www.w3.org/1999/xlink\""));
+    }
+
+    #[test]
+    fn repairs_misnamed_xlink_namespace_from_published_icons() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns2:xlink="http://www.w3.org/1999/xlink"><path fill="#000"/></svg>"##;
+        let result = process_svg_impl(input, "#00acc1", 0.2, "rgb").unwrap();
+        assert!(result.contains("xmlns:xlink=\"http://www.w3.org/1999/xlink\""));
+        assert!(!result.contains("xmlns2:xlink"));
     }
 
     #[test]
@@ -621,7 +847,7 @@ mod tests {
         let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#00ff00"/></svg>"##;
         let result =
             process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
-        assert_eq!(result.matches("fill=\"rgb(128,0,128)\"").count(), 2);
+        assert_eq!(result.matches("fill=\"rgb(255,0,255)\"").count(), 2);
     }
 
     #[test]
@@ -635,7 +861,9 @@ mod tests {
             lightness: (primary_hsl.lightness.clamp(0.0, 1.0) * 255.0).round() / 255.0,
         }));
         assert_eq!(
-            result.matches(format!("fill=\"{expected}\"").as_str()).count(),
+            result
+                .matches(format!("fill=\"{expected}\"").as_str())
+                .count(),
             2
         );
     }
@@ -647,7 +875,8 @@ mod tests {
         // the SVG namespace implicitly. Consumers that treat the output as a
         // standalone document, e.g. <img src="data:image/svg+xml,...">,
         // need it declared explicitly or the image fails to decode.
-        let input = r##"<svg fill="currentColor" viewBox="0 0 16 16"><path fill="#3355ff"/></svg>"##;
+        let input =
+            r##"<svg fill="currentColor" viewBox="0 0 16 16"><path fill="#3355ff"/></svg>"##;
         let single = process_svg_impl(input, "#00acc1", 0.2, "rgb").unwrap();
         let palette =
             process_svg_with_palette_impl(input, "#ff0000", "#0000ff", 1.0, 0.0, "rgb").unwrap();
@@ -659,6 +888,11 @@ mod tests {
     fn does_not_duplicate_an_existing_namespace_declaration() {
         let input = r##"<svg xmlns="http://www.w3.org/2000/svg"><path fill="#3355ff"/></svg>"##;
         let result = process_svg_impl(input, "#00acc1", 0.2, "rgb").unwrap();
-        assert_eq!(result.matches("xmlns=\"http://www.w3.org/2000/svg\"").count(), 1);
+        assert_eq!(
+            result
+                .matches("xmlns=\"http://www.w3.org/2000/svg\"")
+                .count(),
+            1
+        );
     }
 }

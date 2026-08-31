@@ -9,7 +9,35 @@ presentation attributes and equivalent declarations in inline `style`
 attributes. `none`, `transparent`, `url(...)`, and existing `var(...)` paints
 are preserved.
 
-## Build
+## Filesystem CLI
+
+The native Rust CLI is the replacement for the previous TypeScript `npm start`
+program. It recursively reads SVG files from the input directory and writes
+their converted counterparts to the output directory, preserving every nested
+relative path. The paths are used exactly as supplied, so relative paths remain
+relative to the current directory.
+
+```sh
+npm start -- ./example_data ./out "#00acc1" 0.3 rgb
+# Equivalent without npm:
+cargo run --release -- ./example_data ./out "#00acc1" 0.3 rgb
+```
+
+Arguments:
+
+| argument | required | default |
+| --- | --- | --- |
+| `input_dir` | yes | |
+| `output_dir` | yes | |
+| `primary_color` | no | `#BBBBBB` |
+| `tolerance` | no | `0.3` |
+| `output_mode` | no | `rgb` (`css_vars` also writes `color_map.sass`) |
+
+`input_dir` and `output_dir` must differ. This native command is independent
+of the WebAssembly build and does not modify `pkg/`, `demo/`, or the worker
+files.
+
+## WebAssembly build and demo
 
 Install Rust, the `wasm32-unknown-unknown` target, and `wasm-pack`, then run:
 

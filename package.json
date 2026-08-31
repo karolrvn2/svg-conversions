@@ -5,6 +5,8 @@
   "type": "module",
   "exports": "./web/svg-worker-pool.js",
   "scripts": {
+    "start": "cargo run --release --",
+    "start:innotopicwebsite": "cargo run --release -- ../InnoTopicWebsite/src/assets/images/logos ../InnoTopicWebsite/src/assets/images/logos-l/logos #808080 0.3 rgb",
     "build": "wasm-pack build --target web --release --out-dir pkg",
     "prepare:icons": "node scripts/prepare-icons.mjs",
     "build:demo": "npm run build && npm run prepare:icons && trunk build demo/index.html --release --dist dist",
